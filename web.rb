@@ -6,6 +6,8 @@ require 'encrypted_cookie'
 
 $stdout.sync = true # Get puts to show up in heroku logs
 
+set :port, ENV['PORT']
+
 Dotenv.load
 Stripe.api_key = ENV['STRIPE_TEST_SECRET_KEY']
 
@@ -89,7 +91,7 @@ def attach_customer_test_cards
       card: {
         number: cc_number,
         exp_month: 8,
-        exp_year: 2022,
+        exp_year: 2032,
         cvc: '123',
       },
     })
@@ -219,13 +221,25 @@ post '/create_payment_intent' do
   supported_payment_methods = payload[:supported_payment_methods] ? payload[:supported_payment_methods].split(",") : nil
 
   # Calculate how much to charge the customer
-  amount = calculate_price(payload[:products], payload[:shipping])
+  country = payload[:country]
+  amount = calculate_price(payload[:products], payload[:shipping], country)
+  
+  if country == 'in'
+    Stripe.api_key = ENV['IN_secret_key']
+  else
+    Stripe.api_key = ENV['STRIPE_TEST_SECRET_KEY']
+  end
+  
+  customer = payload[:customer_id] || @customer.id
+  if country == 'in'
+    customer = nil
+  end
 
   begin
     payment_intent = Stripe::PaymentIntent.create(
       :amount => amount,
-      :currency => currency_for_country(payload[:country]),
-      :customer => payload[:customer_id] || @customer.id,
+      :currency => currency_for_country(country),
+      :customer => customer,
       :description => "Example PaymentIntent",
       :capture_method => ENV['CAPTURE_METHOD'] == "manual" ? "manual" : "automatic",
       payment_method_types: supported_payment_methods ? supported_payment_methods : payment_methods_for_country(payload[:country]),
@@ -268,12 +282,13 @@ post '/confirm_payment_intent' do
       payment_intent = Stripe::PaymentIntent.confirm(payload[:payment_intent_id], {:use_stripe_sdk => true})
     elsif payload[:payment_method_id]
       # Calculate how much to charge the customer
-      amount = calculate_price(payload[:products], payload[:shipping])
+      country = payload[:country]
+      amount = calculate_price(payload[:products], payload[:shipping], country)
 
       # Create and confirm the PaymentIntent
       payment_intent = Stripe::PaymentIntent.create(
         :amount => amount,
-        :currency => currency_for_country(payload[:country]),
+        :currency => currency_for_country(country),
         :customer => payload[:customer_id] || @customer.id,
         :source => payload[:source],
         :payment_method => payload[:payment_method_id],
@@ -356,8 +371,13 @@ def price_lookup(product)
   return price
 end
 
-def calculate_price(products, shipping)
+def calculate_price(products, shipping, country)
   amount = 1099  # Default amount.
+  
+  if country == 'in'
+    # To make sure it's more than 50 cents, which is required for a PI
+    amount = 9000
+  end
 
   if products
     amount = products.reduce(0) { | sum, product | sum + price_lookup(product) }
